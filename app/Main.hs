@@ -3,4 +3,4 @@ module Main where
 import Lib
 
 main :: IO ()
-main = run "data/moby-dick.txt"
+main = putStrLn "Main" -- run "data/moby-dick.txt"
