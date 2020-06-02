@@ -7,28 +7,33 @@ import Data.Char
 import Control.Monad.State
 import qualified Data.Map.Lazy as M
 import Data.Maybe
+import Data.List
 
 type Token a = [a]
 type Segment a = [Token a]
-type Unigram a = M.Map (Token a) Double
-type Bigram a = M.Map (Token a, Token a) Double
-data Level a = Level { unigram :: Unigram a, bigram :: Bigram a }
+type SingleCounts a = M.Map (Token a) Int
+type DoubleCounts a = M.Map (Token a, Token a) Int
+type Probabilities a = M.Map (Token a) Double
+type Entropies a = M.Map (Token a) Double
 
 run :: String -> IO ()
 run fileName = do
   text <- readFile fileName
   let contents0 = processText text
-      -- unigram0 = asDist $ countUnigram contents0
-      -- contents1 = flatten $ segmentUnigram unigram0 [] contents0
-      -- unigram1 = asDist $ countUnigram contents1
-      bigram0 = asDist $ countBigram contents0
-      contents1 = flatten $ segmentBigram bigram0 [] contents0
-      bigram1 = asDist $ countBigram contents1
-      contents2 = flatten $ segmentBigram bigram1 [] contents1
-  -- pprint unigram4
-  -- pprint bigram1
-  -- print $ take 100 contents0
-  print $ take 100 contents2
+      probs0 = probabilities contents0
+      entropies0 = entropies contents0
+      contents1 = segmentBoth probs0 entropies0 contents0
+      probs1 = probabilities contents1
+      entropies1 = entropies contents1
+      contents2 = segmentBoth probs1 entropies1 contents1
+      probs2 = probabilities contents2
+      entropies2 = entropies contents2
+      contents3 = segmentBoth probs2 entropies2 contents2
+      probs3 = probabilities contents3
+      entropies3 = entropies contents3
+      contents4 = segmentBoth probs3 entropies3 contents3
+  print $ take 100 contents3
+  print $ take 100 contents4
   return ()
 
 processText :: String -> [Token Char]
@@ -40,59 +45,67 @@ replaceDigit x = if isDigit x then '#' else x
 tokenize :: a -> [a]
 tokenize x = [x]
 
-level :: Level a
-level = Level { unigram = M.empty, bigram = M.empty }
-
 pprint :: (Show a, Show b) => M.Map a b -> IO ()
 pprint = mapM_ (putStrLn . \(k, v) -> show k ++ " " ++ show v) . M.toList
 
 pairs :: [a] -> [(a, a)]
 pairs xs@(_:ys) = zip xs ys
 
-incUnigram :: (Ord a) => Token a -> Unigram a -> Unigram a
-incUnigram x = M.insertWith (+) x 1
+flatten :: [[Token a]] -> [Token a]
+flatten = map concat
 
-incBigram :: (Ord a) => (Token a, Token a) -> Bigram a -> Bigram a
-incBigram x = M.insertWith (+) x 1
+count :: (Ord a) => [a] -> M.Map a Int
+count = M.fromListWith (+) . map (,1)
 
-countUnigram :: (Ord a) => [Token a] -> Unigram a
-countUnigram = foldr incUnigram M.empty
+given :: (Ord a) => Token a -> DoubleCounts a -> SingleCounts a
+given x kvs = M.mapKeys snd (M.filterWithKey (\(z, _) _ -> x == z) kvs)
 
-countBigram :: (Ord a) => [Token a] -> Bigram a
-countBigram = foldr incBigram M.empty . pairs
-
-given :: (Eq a) => Token a -> Bigram a -> Bigram a
-given x = M.filterWithKey (\(z, _) _ -> x == z)
-
-asDist :: M.Map a Double -> M.Map a Double
-asDist kvs = M.map (/ total) kvs where total = sum $ M.elems kvs
+asDist :: M.Map a Int -> M.Map a Double
+asDist kvs = M.map ((/ total) . fromIntegral) kvs 
+  where total = fromIntegral $ sum $ M.elems kvs
 
 infoContent :: Double -> Double
 infoContent = negate . logBase 2
 
-entropy :: Bigram a -> Double
+entropy :: Probabilities a -> Double
 entropy = sum . M.map (\p -> p * infoContent p)
 
-isMoreUnexpected :: (Ord a) => Unigram a -> Token a -> Token a -> Bool
-isMoreUnexpected kvs x y = (kvs M.! x) < (kvs M.! y)
+entropies :: (Eq a, Ord a) => [Token a] -> Entropies a
+entropies xs = M.fromList $ map entropyFor keys
+  where kvs = count $ pairs xs
+        keys = nub $ map fst (M.keys kvs)
+        entropyFor x = (x, entropy $ asDist $ given x kvs)
 
-isMoreUncertain :: (Ord a) => Bigram a -> Token a -> Token a -> Bool
-isMoreUncertain kvs x y = entropy (given x kvs) < entropy (given y kvs)
+probabilities :: (Ord a) => [Token a] -> Probabilities a
+probabilities = asDist . count
 
-segmentUnigram :: (Ord a) => Unigram a -> [Token a] -> [Token a] -> [[Token a]]
-segmentUnigram kvs s [] = [s]
-segmentUnigram kvs s [_] = [s]
-segmentUnigram kvs s (x:y:xs) = if isMoreUnexpected kvs x y 
-  then reverse (x:s) : segmentUnigram kvs [] (y:xs)
-  else segmentUnigram kvs (x:s) (y:xs)
+isMoreUnexpected :: (Ord a) => Probabilities a -> Token a -> Token a -> Bool
+isMoreUnexpected kvs x y = fromMaybe False $ do 
+  px <- M.lookup x kvs
+  py <- M.lookup y kvs
+  return $ px > py
 
--- TODO: Too slow => Precompute all entropies
-segmentBigram :: (Ord a) => Bigram a -> [Token a] -> [Token a] -> [[Token a]]
-segmentBigram kvs s [] = [s]
-segmentBigram kvs s [_] = [s]
-segmentBigram kvs s (x:y:xs) = if isMoreUncertain kvs x y
-  then reverse (x:s) : segmentBigram kvs [] (y:xs)
-  else segmentBigram kvs (x:s) (y:xs)
+isMoreUncertain :: (Ord a) => Entropies a -> Token a -> Token a -> Bool
+isMoreUncertain kvs x y = fromMaybe False $ do 
+  ex <- M.lookup x kvs
+  ey <- M.lookup y kvs
+  return $ ex < ey
 
-flatten :: [[Token a]] -> [Token a]
-flatten = map concat
+segmentBy :: (Ord a) => (Token a -> Token a -> Bool) -> [Token a] -> [Token a] -> [[Token a]]
+segmentBy p s [] = [s]
+segmentBy p s [_] = [s]
+segmentBy p s (x:y:xs)
+  | p x y = reverse (x:s) : segmentBy p [] (y:xs)
+  | otherwise = segmentBy p (x:s) (y:xs)
+
+segmentInfoContent :: (Ord a) => Probabilities a -> [Token a] -> [Token a]
+segmentInfoContent kvs xs = flatten $ segmentBy (isMoreUnexpected kvs) [] xs
+
+segmentEntropy :: (Ord a) => Entropies a -> [Token a] -> [Token a]
+segmentEntropy kvs xs = flatten $ segmentBy (isMoreUncertain kvs) [] xs
+
+or2p :: (a -> a -> Bool) -> (a -> a -> Bool) -> (a -> a -> Bool)
+(f `or2p` g) x y = f x y || g x y
+
+segmentBoth :: (Ord a) => Probabilities a -> Entropies a -> [Token a] -> [Token a]
+segmentBoth ps es xs = flatten $ segmentBy (isMoreUnexpected ps `or2p` isMoreUncertain es) [] xs
